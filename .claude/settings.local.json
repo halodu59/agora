@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npx vite *)",
+      "Bash(find \"/c/Users/matt5/AppData/Local/Temp\" -name \"*.html\" -o -name \"*.css\" 2>/dev/null | head -30)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}

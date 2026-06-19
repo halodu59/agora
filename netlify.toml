@@ -1,0 +1,28 @@
+[build]
+  command   = "npm run build"
+  publish   = "dist"
+
+[functions]
+  directory         = "netlify/functions"
+  node_bundler      = "esbuild"
+
+[[redirects]]
+  from   = "/api/factcheck"
+  to     = "/.netlify/functions/factcheck"
+  status = 200
+
+[[redirects]]
+  from   = "/api/chat"
+  to     = "/.netlify/functions/chat"
+  status = 200
+
+[[redirects]]
+  from   = "/api/quickhints"
+  to     = "/.netlify/functions/quickhints"
+  status = 200
+
+# SPA fallback — must be last
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
