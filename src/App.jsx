@@ -179,7 +179,7 @@ export default function App() {
                 <span className="idle-title-muted">amplified by evidence.</span>
               </h1>
               <p className="idle-desc">
-                Share an idea or a worry in any language, in your own words. Agora researches
+                Share an idea or a worry as a citizen in any language, in your own words. Agora researches
                 it, checks the facts, and builds a complete dossier ready to put in front of the
                 people who decide.
               </p>
