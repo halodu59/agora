@@ -157,7 +157,7 @@ export default function App() {
   const runAnalysis = async (claimText = input) => {
     if (!claimText.trim()) return;
     timers.current.forEach(clearTimeout);
-    setPhase("loading"); setStep(0); setResult(null);
+    setPhase("loading"); setStep(0); setVersions([]); setActiveIdx(0);
     setShowSources(false); setChatMessages([]); setChatInput("");
 
     // Animated steps
