@@ -17,6 +17,36 @@
   status = 200
 
 [[redirects]]
+  from   = "/api/refine"
+  to     = "/.netlify/functions/refine"
+  status = 200
+
+[[redirects]]
+  from   = "/api/admin-login"
+  to     = "/.netlify/functions/admin-login"
+  status = 200
+
+[[redirects]]
+  from   = "/api/submit-idea"
+  to     = "/.netlify/functions/submit-idea"
+  status = 200
+
+[[redirects]]
+  from   = "/api/ideas-list"
+  to     = "/.netlify/functions/ideas-list"
+  status = 200
+
+[[redirects]]
+  from   = "/api/idea-update"
+  to     = "/.netlify/functions/idea-update"
+  status = 200
+
+[[redirects]]
+  from   = "/api/synthesize-report"
+  to     = "/.netlify/functions/synthesize-report"
+  status = 200
+
+[[redirects]]
   from   = "/api/quickhints"
   to     = "/.netlify/functions/quickhints"
   status = 200

@@ -1,6 +1,10 @@
 import express from 'express'
 import cors from 'cors'
 import Groq from 'groq-sdk'
+import fs from 'fs'
+import path from 'path'
+import crypto from 'crypto'
+import { fileURLToPath } from 'url'
 
 const app = express()
 app.use(cors())
@@ -8,6 +12,50 @@ app.use(express.json())
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const TAVILY_KEY = process.env.TAVILY_API_KEY
+
+// ── Local idea store (JSON file) — mirrors Netlify Blobs in production ──
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const DATA_DIR = path.join(__dirname, 'data')
+const IDEAS_FILE = path.join(DATA_DIR, 'ideas.json')
+
+function readIdeas() {
+  if (!fs.existsSync(IDEAS_FILE)) return []
+  try { return JSON.parse(fs.readFileSync(IDEAS_FILE, 'utf-8')) } catch { return [] }
+}
+function writeIdeas(ideas) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(IDEAS_FILE, JSON.stringify(ideas, null, 2))
+}
+
+// ── Admin auth (stateless HMAC token, mirrors netlify/functions/_auth.mjs) ──
+const ADMIN_SECRET = process.env.ADMIN_SECRET || process.env.ADMIN_PASSWORD || 'agora-dev-secret'
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000
+function signToken(payload) { return crypto.createHmac('sha256', ADMIN_SECRET).update(payload).digest('hex') }
+function issueToken() { const exp = Date.now() + TOKEN_TTL_MS; const p = String(exp); return `${p}.${signToken(p)}` }
+function verifyToken(token) {
+  if (!token || !token.includes('.')) return false
+  const [exp, sig] = token.split('.')
+  return signToken(exp) === sig && Number(exp) > Date.now()
+}
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization || ''
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null
+  if (!verifyToken(token)) return res.status(401).json({ error: 'Unauthorized' })
+  next()
+}
+
+const THEMES = ['Urban', 'Energy', 'Climate', 'Health', 'Education', 'Safety', 'Transport', 'Economy', 'Other']
+async function tagTheme(claim) {
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: `Classify this citizen idea into exactly one theme from this list: ${THEMES.join(', ')}.\nIdea: "${claim}"\nRespond with only the theme word, nothing else.` }],
+      temperature: 0, max_tokens: 10,
+    })
+    const word = completion.choices[0]?.message?.content?.trim()
+    return THEMES.includes(word) ? word : 'Other'
+  } catch { return 'Other' }
+}
 
 function extractKeyTerms(text) {
   const stopwords = new Set([
@@ -223,6 +271,171 @@ app.post('/api/chat', async (req, res) => {
     })
     const reply = completion.choices[0]?.message?.content?.trim() || 'I could not generate a response.'
     res.json({ reply })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ── REFINE (structured re-analysis, keeps version history) ───────
+app.post('/api/refine', async (req, res) => {
+  const { claim, previousResult, instruction, detectedLanguage = 'en' } = req.body
+  if (!instruction?.trim()) return res.status(400).json({ error: 'No instruction' })
+  if (!previousResult) return res.status(400).json({ error: 'No previousResult' })
+
+  const prompt = `You are refining an existing civic dossier based on the user's feedback. Keep everything anchored to the ORIGINAL CLAIM and stay consistent with the previous version unless the requested change implies otherwise.
+
+ORIGINAL CLAIM:
+"${claim}"
+
+PREVIOUS VERSION (JSON):
+${JSON.stringify({
+    verdict: previousResult.verdict, verdictStyle: previousResult.verdictStyle,
+    verdictSimple: previousResult.verdictSimple, confidence: previousResult.confidence,
+    simpleSummary: previousResult.simpleSummary, synthesisText: previousResult.synthesisText,
+    proArguments: previousResult.proArguments, conArguments: previousResult.conArguments,
+    civicDossier: previousResult.civicDossier,
+  })}
+
+USER'S REQUESTED CHANGE:
+"${instruction}"
+
+RULES:
+1. Respond ENTIRELY in this language: "${detectedLanguage}"
+2. Apply the requested change precisely. Keep unrelated fields the same as the previous version unless the change naturally affects them.
+3. Stay anchored to the user's original claim — never drift to generic content.
+4. changeSummary must be ONE short sentence (max 14 words) describing what you changed, in the user's language.
+
+Respond ONLY with valid JSON (no markdown), same shape as the previous version, plus changeSummary:
+{
+  "changeSummary": "Shortened the letter and added a cost estimate.",
+  "detectedLanguage": "${detectedLanguage}",
+  "verdict": "...", "verdictStyle": "...", "verdictSimple": "...", "confidence": 72,
+  "simpleSummary": "...", "synthesisText": "...",
+  "proArguments": ["..."], "conArguments": ["..."],
+  "civicDossier": {
+    "proposalTitle": "...", "executiveSummary": "...",
+    "keyEvidence": [{"stat":"45","unit":"%","label":"...","source":"..."}],
+    "scientificConsensus": "...", "actionSteps": ["..."], "stakeholders": ["..."],
+    "petitionText": "...", "expectedImpact": "..."
+  }
+}`
+
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3, max_tokens: 2800,
+    })
+    const rawText = completion.choices[0]?.message?.content?.trim() || ''
+    let updated
+    try {
+      const m = rawText.match(/\{[\s\S]*\}/)
+      updated = JSON.parse(m ? m[0] : rawText)
+    } catch {
+      return res.status(500).json({ error: 'Could not parse refinement' })
+    }
+    res.json({
+      ...updated,
+      sources: previousResult.sources || [],
+      eduResources: previousResult.eduResources || [],
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ── ADMIN LOGIN ─────────────────────────────────────────────────────
+app.post('/api/admin-login', (req, res) => {
+  const { password } = req.body
+  const expected = process.env.ADMIN_PASSWORD
+  if (!expected) return res.status(500).json({ error: 'Admin login is not configured on the server' })
+  if (!password || password !== expected) return res.status(401).json({ error: 'Incorrect password' })
+  res.json({ token: issueToken() })
+})
+
+// ── SUBMIT IDEA (citizen → mairie) ────────────────────────────────
+app.post('/api/submit-idea', async (req, res) => {
+  const { claimText, citizenName, result, detectedLanguage } = req.body
+  if (!claimText?.trim() || !result) return res.status(400).json({ error: 'Missing claimText or result' })
+
+  const theme = await tagTheme(claimText)
+  const id = `idea_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+  const record = {
+    id, claimText, citizenName: citizenName?.trim() || null,
+    detectedLanguage: detectedLanguage || 'en', theme,
+    status: 'new', statusNote: '',
+    createdAt: new Date().toISOString(), result,
+  }
+  const ideas = readIdeas()
+  ideas.push(record)
+  writeIdeas(ideas)
+  res.json({ id, theme })
+})
+
+// ── LIST IDEAS (mairie dashboard) ─────────────────────────────────
+app.get('/api/ideas-list', requireAuth, (req, res) => {
+  const ideas = readIdeas().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+  res.json({ ideas })
+})
+
+// ── UPDATE IDEA STATUS ─────────────────────────────────────────────
+app.post('/api/idea-update', requireAuth, (req, res) => {
+  const { id, status, statusNote } = req.body
+  if (!id) return res.status(400).json({ error: 'Missing id' })
+  const ideas = readIdeas()
+  const idx = ideas.findIndex(i => i.id === id)
+  if (idx === -1) return res.status(404).json({ error: 'Idea not found' })
+  if (status) ideas[idx].status = status
+  if (statusNote !== undefined) ideas[idx].statusNote = statusNote
+  ideas[idx].updatedAt = new Date().toISOString()
+  writeIdeas(ideas)
+  res.json({ idea: ideas[idx] })
+})
+
+// ── SYNTHESIZE MONTHLY REPORT ──────────────────────────────────────
+app.get('/api/synthesize-report', requireAuth, async (req, res) => {
+  const ideas = readIdeas()
+  if (ideas.length === 0) return res.json({ report: null, ideaCount: 0 })
+
+  const byTheme = {}
+  ideas.forEach(i => { byTheme[i.theme] = byTheme[i.theme] || []; byTheme[i.theme].push(i) })
+  const themeSummaries = Object.entries(byTheme).map(([theme, list]) => {
+    const lines = list.map(i => `- "${i.claimText}" (status: ${i.status}${i.citizenName ? `, submitted by ${i.citizenName}` : ''})`).join('\n')
+    return `### ${theme} (${list.length} ideas)\n${lines}`
+  }).join('\n\n')
+
+  const prompt = `You are a civic analyst preparing a monthly municipal report from citizen-submitted ideas collected on Agora, a civic platform.
+
+ALL SUBMITTED IDEAS, GROUPED BY THEME:
+${themeSummaries}
+
+Write a concise executive synthesis for municipal staff. Identify recurring concerns, group similar ideas together even across themes if they relate, and suggest priorities.
+
+Respond ONLY with valid JSON (no markdown):
+{
+  "executiveSummary": "3-4 sentences summarizing the month's citizen input overall",
+  "topThemes": [{"theme": "Urban", "count": 4, "insight": "One sentence on what citizens are asking for"}],
+  "recurringConcerns": ["Concern appearing across multiple submissions"],
+  "recommendedPriorities": ["Priority action 1 for the council", "Priority action 2"],
+  "clusters": [{"title": "Short label for related ideas", "relatedClaims": ["exact claim text 1", "exact claim text 2"]}]
+}`
+
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3, max_tokens: 2000,
+    })
+    const rawText = completion.choices[0]?.message?.content?.trim() || ''
+    let report
+    try { const m = rawText.match(/\{[\s\S]*\}/); report = JSON.parse(m ? m[0] : rawText) } catch { report = null }
+
+    const statusCounts = ideas.reduce((acc, i) => { acc[i.status] = (acc[i.status] || 0) + 1; return acc }, {})
+    res.json({
+      report, ideaCount: ideas.length, statusCounts,
+      themeCounts: Object.fromEntries(Object.entries(byTheme).map(([k, v]) => [k, v.length])),
+      generatedAt: new Date().toISOString(),
+    })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

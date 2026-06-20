@@ -1,8 +1,13 @@
 import Groq from 'groq-sdk'
+import { getStore } from '@netlify/blobs'
 
 export const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 })
+
+export function ideaStore() {
+  return getStore('agora-ideas')
+}
 
 export const TAVILY_KEY = process.env.TAVILY_API_KEY
 

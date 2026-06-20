@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { generateCivicPdf } from "./lib/pdf.js";
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -35,12 +36,19 @@ function t(obj, lang) {
   return obj?.[lang] || obj?.en || "";
 }
 
+const SPEECH_LANG = { en: "en-US", es: "es-ES", fr: "fr-FR", pt: "pt-PT", ar: "ar-SA" };
+
 export default function App() {
   const [input, setInput]             = useState("");
   const [phase, setPhase]             = useState("idle");   // idle | loading | done
   const [step, setStep]               = useState(0);
-  const [result, setResult]           = useState(null);
   const [showSources, setShowSources] = useState(false);
+
+  // ── Version history: the original analysis is version 0 and is never overwritten.
+  // Each refinement via chat produces a new full structured version, kept alongside the rest.
+  const [versions, setVersions]             = useState([]); // [{ label, result }]
+  const [activeVersionIndex, setActiveIdx]  = useState(0);
+  const result = versions[activeVersionIndex]?.result || null;
 
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput]       = useState("");
@@ -49,17 +57,101 @@ export default function App() {
   const [copied, setCopied]   = useState(false);
   const [showToast, setShowToast] = useState(false);
 
+  // ── Official PDF ──
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [citizenName, setCitizenName]     = useState("");
+
+  // ── Submit to mairie ──
+  const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  // ── Accessibility: voice input / voice output ──
+  const [listeningField, setListeningField] = useState(null); // "main" | "chat" | null
+  const [speakingId, setSpeakingId]         = useState(null);
+  const recognitionRef = useRef(null);
+
   const chatEndRef = useRef(null);
   const timers     = useRef([]);
 
   const lang = result?.detectedLanguage || "en";
   const vc   = VERDICT_COLORS[result?.verdictStyle] || VERDICT_COLORS.muted;
 
+  const speechSupported = typeof window !== "undefined" &&
+    (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
-  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  useEffect(() => () => {
+    timers.current.forEach(clearTimeout);
+    if (ttsSupported) window.speechSynthesis.cancel();
+    recognitionRef.current?.stop();
+  }, []);
+
+  /* ── Voice input (speech-to-text) ── */
+  const startListening = (field, onResult) => {
+    if (!speechSupported) return;
+    if (listeningField) { recognitionRef.current?.stop(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR();
+    rec.lang = SPEECH_LANG[lang] || "en-US";
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.onresult = (e) => {
+      const text = Array.from(e.results).map(r => r[0].transcript).join(" ");
+      onResult(text);
+    };
+    rec.onerror = () => setListeningField(null);
+    rec.onend = () => setListeningField(null);
+    recognitionRef.current = rec;
+    setListeningField(field);
+    rec.start();
+  };
+
+  /* ── Voice output (text-to-speech) ── */
+  const speak = (id, text, speakLang = lang) => {
+    if (!ttsSupported || !text) return;
+    if (speakingId === id) {
+      window.speechSynthesis.cancel();
+      setSpeakingId(null);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = SPEECH_LANG[speakLang] || "en-US";
+    utter.rate = 0.95;
+    utter.onend = () => setSpeakingId(null);
+    utter.onerror = () => setSpeakingId(null);
+    setSpeakingId(id);
+    window.speechSynthesis.speak(utter);
+  };
+
+  const SpeakBtn = ({ id, text }) => {
+    if (!ttsSupported || !text) return null;
+    const active = speakingId === id;
+    return (
+      <button
+        type="button"
+        className={`speak-btn ${active ? "active" : ""}`}
+        onClick={() => speak(id, text)}
+        aria-label="Listen"
+        title="Listen"
+      >
+        {active ? (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="6" y="6" width="12" height="12" rx="1"/>
+          </svg>
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          </svg>
+        )}
+      </button>
+    );
+  };
 
   /* ── Analysis ── */
   const runAnalysis = async (claimText = input) => {
@@ -85,42 +177,51 @@ export default function App() {
       timers.current.forEach(clearTimeout);
       setStep(STEPS.length - 1);
       await delay(400);
-      setResult(data);
+      setVersions([{ label: null, instruction: null, result: data }]);
+      setActiveIdx(0);
       setPhase("done");
     } catch (err) {
       timers.current.forEach(clearTimeout);
-      setResult({
-        detectedLanguage: "en",
-        verdict: "NETWORK ERROR", verdictStyle: "muted",
-        verdictSimple: "Could not reach the server.",
-        confidence: 0,
-        simpleSummary: `Make sure the backend is running (npm run server). Error: ${err.message}`,
-        synthesisText: "",
-        proArguments: [], conArguments: [],
-        civicDossier: null, eduResources: [], sources: [],
-      });
+      setVersions([{
+        label: null, instruction: null,
+        result: {
+          detectedLanguage: "en",
+          verdict: "NETWORK ERROR", verdictStyle: "muted",
+          verdictSimple: "Could not reach the server.",
+          confidence: 0,
+          simpleSummary: `Make sure the backend is running (npm run server). Error: ${err.message}`,
+          synthesisText: "",
+          proArguments: [], conArguments: [],
+          civicDossier: null, eduResources: [], sources: [],
+        },
+      }]);
+      setActiveIdx(0);
       setPhase("done");
     }
   };
 
-  /* ── Chat ── */
+  /* ── Refine: produces a new structured version, never overwrites the original ── */
   const sendChat = async (message = chatInput) => {
-    if (!message.trim() || chatLoading) return;
+    if (!message.trim() || chatLoading || !result) return;
     setChatMessages(h => [...h, { role: "user", content: message }]);
     setChatInput(""); setChatLoading(true);
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/refine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           claim: input,
-          message,
-          history: chatMessages,
+          previousResult: result,
+          instruction: message,
           detectedLanguage: lang,
         }),
       });
+      if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data = await res.json();
-      setChatMessages(h => [...h, { role: "assistant", content: data.reply }]);
+      const summary = data.changeSummary || "Updated the dossier.";
+      setVersions(v => [...v, { label: summary, instruction: message, result: data }]);
+      setActiveIdx(versions.length); // jump to the newly created version
+      setChatMessages(h => [...h, { role: "assistant", content: `✏️ ${summary}` }]);
     } catch {
       setChatMessages(h => [...h, { role: "assistant", content: "Sorry, something went wrong. Please try again." }]);
     }
@@ -138,11 +239,42 @@ export default function App() {
     });
   };
 
+  /* ── Official PDF ── */
+  const downloadPdf = () => {
+    if (!result) return;
+    generateCivicPdf({ claimText: input, result, citizenName });
+    setShowNameModal(false);
+  };
+
+  /* ── Submit to mairie ── */
+  const submitToMairie = async () => {
+    if (!result || submitting || submitted) return;
+    setSubmitting(true);
+    try {
+      await fetch("/api/submit-idea", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          claimText: input,
+          citizenName,
+          result,
+          detectedLanguage: lang,
+        }),
+      });
+      setSubmitted(true);
+    } catch {
+      // silent fail — citizen can retry
+    }
+    setSubmitting(false);
+  };
+
   /* ── Reset ── */
   const reset = () => {
     timers.current.forEach(clearTimeout);
-    setPhase("idle"); setInput(""); setResult(null);
+    setPhase("idle"); setInput("");
+    setVersions([]); setActiveIdx(0);
     setChatMessages([]); setChatInput(""); setStep(0);
+    setSubmitted(false);
   };
 
   return (
@@ -170,18 +302,13 @@ export default function App() {
           <div className="idle-view">
 
             <div>
-              <div className="idle-eyebrow">
-                <span className="idle-eyebrow-line" />
-                Civic Intelligence
-              </div>
               <h1 className="idle-title">
-                Your voice,<br />
-                <span className="idle-title-muted">amplified by evidence.</span>
+                Tell us your idea.<br />
+                <span className="idle-title-muted">We'll help you be heard.</span>
               </h1>
               <p className="idle-desc">
-                Share an idea or a worry — in any language, in your own words. Agora researches
-                it, checks the facts, and builds a complete dossier ready to put in front of the
-                people who decide.
+                Speak or write — in any language. We check the facts and prepare your
+                idea to show to the people who can act on it.
               </p>
             </div>
 
@@ -192,17 +319,29 @@ export default function App() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 rows={5}
-                placeholder="Write here in any language — Spanish, French, English, Portuguese, Arabic…"
+                placeholder="Write here, or press the microphone to talk…"
               />
               <div className="input-card-footer">
-                <span className="input-card-hint">Any language · detected automatically</span>
+                {speechSupported ? (
+                  <button
+                    type="button"
+                    className={`mic-btn ${listeningField === "main" ? "active" : ""}`}
+                    onClick={() => startListening("main", text => setInput(prev => (prev ? prev + " " : "") + text))}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                    {listeningField === "main" ? "Listening…" : "Speak instead"}
+                  </button>
+                ) : <span className="input-card-hint">Any language · detected automatically</span>}
                 <button
                   className="analyze-btn"
                   onClick={() => runAnalysis()}
                   disabled={!input.trim()}
                   style={{ opacity: input.trim() ? 1 : 0.55 }}
                 >
-                  Build my dossier
+                  Check my idea
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
                   </svg>
@@ -213,7 +352,7 @@ export default function App() {
             {/* Examples */}
             <div>
               <div className="examples-label">
-                Try an example
+                Or try an example
                 <span className="examples-label-line" />
               </div>
               <div className="examples-list">
@@ -267,6 +406,24 @@ export default function App() {
         {phase === "done" && result && (
           <div className="results-view">
 
+            {/* ── Version timeline ── */}
+            {versions.length > 1 && (
+              <div className="version-row">
+                {versions.map((v, i) => (
+                  <button
+                    key={i}
+                    className={`version-chip ${i === activeVersionIndex ? "active" : ""}`}
+                    onClick={() => setActiveIdx(i)}
+                    title={v.instruction || "Original analysis"}
+                  >
+                    {i === 0
+                      ? (lang === "es" ? "Original" : lang === "fr" ? "Original" : "Original")
+                      : `v${i + 1} · ${v.label.length > 28 ? v.label.slice(0, 28) + "…" : v.label}`}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* ── Claim echo ── */}
             <div className="result-section" style={{ paddingTop: 0 }}>
               <div className="claim-label-row">
@@ -290,6 +447,7 @@ export default function App() {
                   </div>
                   <div className="verdict-headline">
                     {result.verdictSimple}
+                    <SpeakBtn id="verdict" text={result.verdictSimple} />
                   </div>
                   <div className="confidence-row">
                     <div className="confidence-track">
@@ -304,7 +462,10 @@ export default function App() {
             {/* ── Synthesis ── */}
             {result.synthesisText && (
               <div className="result-section">
-                <p className="synthesis-text">{result.synthesisText}</p>
+                <p className="synthesis-text">
+                  {result.synthesisText}
+                  <SpeakBtn id="synthesis" text={result.synthesisText} />
+                </p>
               </div>
             )}
 
@@ -361,7 +522,10 @@ export default function App() {
                     <span className="ds-label">Formal proposal</span>
                     <div className="proposal-title">{result.civicDossier.proposalTitle}</div>
                     {result.civicDossier.executiveSummary && (
-                      <div className="proposal-summary">{result.civicDossier.executiveSummary}</div>
+                      <div className="proposal-summary">
+                        {result.civicDossier.executiveSummary}
+                        <SpeakBtn id="proposal" text={result.civicDossier.executiveSummary} />
+                      </div>
                     )}
                   </div>
                 )}
@@ -430,13 +594,16 @@ export default function App() {
                   <div className="dossier-section">
                     <div className="letter-header">
                       <span className="ds-label" style={{ marginBottom: 0 }}>Ready-to-send letter</span>
-                      <button className="copy-btn" onClick={copyLetter}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                          <rect x="9" y="9" width="13" height="13" rx="2"/>
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                        </svg>
-                        {copied ? "Copied" : "Copy"}
-                      </button>
+                      <div style={{ display: "flex", gap: ".5rem" }}>
+                        <SpeakBtn id="letter" text={result.civicDossier.petitionText} />
+                        <button className="copy-btn" onClick={copyLetter}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                          </svg>
+                          {copied ? "Copied" : "Copy"}
+                        </button>
+                      </div>
                     </div>
                     <div className="letter-box">{result.civicDossier.petitionText}</div>
                   </div>
@@ -522,6 +689,7 @@ export default function App() {
                       style={{ justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
                       <div className={`chat-bubble ${msg.role === "user" ? "user" : "ai"}`}>
                         {msg.content}
+                        {msg.role === "assistant" && <SpeakBtn id={`chat-${i}`} text={msg.content} />}
                       </div>
                     </div>
                   ))}
@@ -545,6 +713,20 @@ export default function App() {
                   placeholder="Ask to adjust the proposal, add a counter-argument, soften the tone…"
                   disabled={chatLoading}
                 />
+                {speechSupported && (
+                  <button
+                    type="button"
+                    className={`chat-mic-btn ${listeningField === "chat" ? "active" : ""}`}
+                    onClick={() => startListening("chat", text => setChatInput(prev => (prev ? prev + " " : "") + text))}
+                    aria-label="Speak"
+                    title="Speak"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                  </button>
+                )}
                 <button className="chat-send-btn" onClick={() => sendChat()}
                   disabled={!chatInput.trim() || chatLoading}>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -564,6 +746,35 @@ export default function App() {
 
             {/* ── Footer actions ── */}
             <div className="footer-actions">
+              <button
+                className={`submit-btn ${submitted ? "done" : ""}`}
+                onClick={submitToMairie}
+                disabled={submitting || submitted}
+              >
+                {submitted ? (
+                  <>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                    {lang === "es" ? "Enviado a la municipalidad" : lang === "fr" ? "Envoyé à la mairie" : "Sent to your local council"}
+                  </>
+                ) : (
+                  <>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>
+                    </svg>
+                    {submitting
+                      ? "…"
+                      : (lang === "es" ? "Enviar a la municipalidad" : lang === "fr" ? "Envoyer à la mairie" : "Submit to my local council")}
+                  </>
+                )}
+              </button>
+              <button className="pdf-btn" onClick={() => setShowNameModal(true)}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+                </svg>
+                {lang === "es" ? "Descargar documento oficial" : lang === "fr" ? "Télécharger le document officiel" : "Download official document"}
+              </button>
               <button className="new-idea-btn" onClick={reset}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
@@ -584,6 +795,38 @@ export default function App() {
 
       {showToast && (
         <div className="copy-toast">✓ Letter copied to clipboard</div>
+      )}
+
+      {showNameModal && (
+        <div className="modal-overlay" onClick={() => setShowNameModal(false)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">
+              {lang === "es" ? "Tu documento oficial" : lang === "fr" ? "Ton document officiel" : "Your official document"}
+            </div>
+            <p className="modal-desc">
+              {lang === "es"
+                ? "Tu nombre puede aparecer si la municipalidad acepta y trabaja tu idea. Esto es opcional."
+                : lang === "fr"
+                ? "Ton nom peut apparaître si la mairie accepte et travaille ton idée. C'est facultatif."
+                : "Your name may appear if the municipality accepts and works on your idea. This is optional."}
+            </p>
+            <input
+              className="modal-input"
+              value={citizenName}
+              onChange={e => setCitizenName(e.target.value)}
+              placeholder={lang === "es" ? "Tu nombre (opcional)" : lang === "fr" ? "Ton nom (facultatif)" : "Your name (optional)"}
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button className="modal-skip-btn" onClick={downloadPdf}>
+                {lang === "es" ? "Omitir" : lang === "fr" ? "Passer" : "Skip"}
+              </button>
+              <button className="modal-confirm-btn" onClick={downloadPdf}>
+                {lang === "es" ? "Generar PDF" : lang === "fr" ? "Générer le PDF" : "Generate PDF"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
