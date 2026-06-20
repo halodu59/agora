@@ -307,7 +307,7 @@ export default function App() {
                 <span className="idle-title-muted">We'll help you be heard.</span>
               </h1>
               <p className="idle-desc">
-                Speak or write — in any language. We check the facts and prepare your
+                Speak or write in any language. We check the facts and prepare your
                 idea to show to the people who can act on it.
               </p>
             </div>
