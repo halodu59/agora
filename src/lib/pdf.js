@@ -20,26 +20,28 @@ function wrapText(doc, text, maxWidth) {
   return doc.splitTextToSize(text || "", maxWidth);
 }
 
-function drawStamp(doc, x, y, radius, refCode, dateStr) {
+export function drawStamp(doc, x, y, radius, refCode, dateStr) {
   doc.setDrawColor(...GOLD);
   doc.setLineWidth(0.6);
   doc.circle(x, y, radius, "S");
-  doc.circle(x, y, radius - 2.2, "S");
+  doc.circle(x, y, radius - 2.4, "S");
+
+  // small five-point star at the very top, well inside the inner circle's narrow cap
+  doc.setFillColor(...GOLD);
+  const starY = y - radius + 5.5;
+  doc.circle(x, starY, 0.6, "F");
 
   doc.setFont("times", "bold");
-  doc.setFontSize(7.5);
+  doc.setFontSize(7.2);
   doc.setTextColor(...GOLD);
-  doc.text("AGORA", x, y - 3, { align: "center" });
+  doc.text("AGORA", x, y - 2.5, { align: "center" });
 
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(5.2);
-  doc.text("CIVIC INTELLIGENCE", x, y + 1, { align: "center" });
-  doc.text(refCode, x, y + 4.5, { align: "center" });
-  doc.text(dateStr, x, y + 7.5, { align: "center" });
-
-  // rotated micro-text ring effect (simple top/bottom labels instead of true curved text)
-  doc.setFontSize(4.4);
-  doc.text("· OFFICIAL RECORD ·", x, y - radius + 5, { align: "center" });
+  doc.setFontSize(4.6);
+  doc.text("CIVIC INTELLIGENCE", x, y + 1.4, { align: "center" });
+  doc.setFontSize(4.2);
+  doc.text(refCode, x, y + 4.4, { align: "center" });
+  doc.text(dateStr, x, y + 7.2, { align: "center" });
 }
 
 export function generateCivicPdf({ claimText, result, citizenName }) {

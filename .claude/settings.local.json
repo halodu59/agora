@@ -11,7 +11,11 @@
       "Bash(git branch *)",
       "Bash(git push *)",
       "Bash(npm run *)",
-      "Bash(npm ls *)"
+      "Bash(npm ls *)",
+      "Bash(git fetch *)",
+      "Bash(git merge *)",
+      "Bash(curl -s \"https://agora-oxford.netlify.app/\")",
+      "Bash(curl -s -w \"\\\\nHTTP_STATUS:%{http_code}\\\\n\" -X POST \"https://agora-oxford.netlify.app/api/factcheck\" -H \"Content-Type: application/json\" -d '{\"claim\":\"test idea about buses\"}' --max-time 25)"
     ]
   }
 }

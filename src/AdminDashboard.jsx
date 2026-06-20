@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { generateReportPdf } from "./lib/reportPdf.js";
 
 const STATUS_LABELS = {
   new:         { label: "New",          color: "#938C80" },
@@ -179,9 +180,16 @@ export default function AdminDashboard() {
         <div className="admin-section">
           <div className="admin-section-header">
             <span>Monthly synthesis report</span>
-            <button className="admin-btn" onClick={generateReport} disabled={reportLoading || ideas.length === 0}>
-              {reportLoading ? "Generating…" : "Generate report"}
-            </button>
+            <div style={{ display: "flex", gap: ".5rem" }}>
+              <button className="admin-btn" onClick={generateReport} disabled={reportLoading || ideas.length === 0}>
+                {reportLoading ? "Generating…" : "Generate report"}
+              </button>
+              {report?.report && (
+                <button className="admin-btn ghost" onClick={() => generateReportPdf(report)}>
+                  Download PDF
+                </button>
+              )}
+            </div>
           </div>
 
           {report?.report && (
