@@ -6,6 +6,12 @@ export const groq = new Groq({
 })
 
 export function ideaStore() {
+  const siteID = process.env.BLOBS_SITE_ID
+  const token  = process.env.BLOBS_TOKEN
+  // Manual config fallback — automatic context injection doesn't work on every Netlify account/deploy.
+  if (siteID && token) {
+    return getStore({ name: 'agora-ideas', siteID, token })
+  }
   return getStore('agora-ideas')
 }
 
